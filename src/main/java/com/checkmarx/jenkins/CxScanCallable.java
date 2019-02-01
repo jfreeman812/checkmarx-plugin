@@ -2,6 +2,7 @@ package com.checkmarx.jenkins;
 
 import com.cx.restclient.CxShragaClient;
 import com.cx.restclient.configuration.CxScanConfig;
+import com.cx.restclient.dto.ScanResults;
 import com.cx.restclient.exception.CxClientException;
 import com.cx.restclient.osa.dto.OSAResults;
 import com.cx.restclient.sast.dto.SASTResults;
@@ -45,15 +46,29 @@ public class CxScanCallable implements FilePath.FileCallable<ScanResults>, Seria
         CxShragaClient shraga = new CxShragaClient(config, log);
         try {
             shraga.init();
-        } catch (Exception e) {
-            throw new IOException(e);
-        }
+        } catch (Exception ex) {
+            if (ex.getMessage().contains("Server is unavailable")) {
+                try {
+                    shraga.login();
+                } catch (CxClientException e) {
+                    throw new IOException(e);
+                }
 
+                String errorMsg = "Connection Failed.\n" +
+                        "Validate the provided login credentials and server URL are correct.\n" +
+                        "In addition, make sure the installed plugin version is compatible with the CxSAST version according to CxSAST release notes.\n" +
+                        "Error: " + ex.getMessage();
+
+                throw new IOException(errorMsg);
+            }
+            throw new IOException(ex);
+        }
         if (config.getSastEnabled()) {
             try {
                 shraga.createSASTScan();
                 sastCreated = true;
             } catch (IOException | CxClientException e) {
+                log.error("Failed to create SAST scan: " + e.getMessage());
                 ret.setSastCreateException(e);
             }
         }
@@ -71,6 +86,7 @@ public class CxScanCallable implements FilePath.FileCallable<ScanResults>, Seria
                 shraga.createOSAScan();
                 osaCreated = true;
             } catch (CxClientException | IOException e) {
+                log.error("Failed to create OSA scan: " + e.getMessage());
                 ret.setOsaCreateException(e);
             } finally {
                 handler.flush();
@@ -83,12 +99,13 @@ public class CxScanCallable implements FilePath.FileCallable<ScanResults>, Seria
                 SASTResults sastResults = config.getSynchronous() ? shraga.waitForSASTResults() : shraga.getLatestSASTResults();
                 ret.setSastResults(sastResults);
             } catch (InterruptedException e) {
-                if(config.getSynchronous()) {
+                if (config.getSynchronous()) {
                     cancelScan(shraga);
                 }
                 throw e;
 
             } catch (CxClientException | IOException e) {
+                log.error("Failed to get SAST scan results: " + e.getMessage());
                 ret.setSastWaitException(e);
             }
         }
@@ -98,8 +115,13 @@ public class CxScanCallable implements FilePath.FileCallable<ScanResults>, Seria
                 OSAResults osaResults = config.getSynchronous() ? shraga.waitForOSAResults() : shraga.getLatestOSAResults();
                 ret.setOsaResults(osaResults);
             } catch (CxClientException | IOException e) {
+                log.error("Failed to get OSA scan results: " + e.getMessage());
                 ret.setOsaWaitException(e);
             }
+        }
+
+        if (config.getEnablePolicyViolations()) {
+            shraga.printIsProjectViolated();
         }
 
         return ret;
